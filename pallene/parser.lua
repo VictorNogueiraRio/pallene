@@ -152,71 +152,16 @@ function Parser:Toplevel()
         return ast.Toplevel.Record(start.loc, id.value, fields)
 
     else
-        local visibility
-        if self:peek("local") or self:peek("export") then
-            self:region_begin()
-            visibility = self:e()
-            self:region_end(true)
-        else
-            visibility = false
+        local stat = self:Stat()
+        if stat._tag ~= "ast.Stat.Return" and
+           stat._tag ~= "ast.Stat.Decl" and
+           stat._tag ~= "ast.Stat.Assign" and
+           stat._tag ~= "ast.Stat.Func"
+        then
+            self:syntax_error(stat.loc,
+                "Toplevel statements can only be Returns, Declarations or Assignments")
         end
-
-        if self:peek("function") then
-            local start    = self:e()
-            local id       = self:e("NAME")
-            local oparen   = self:e("(")
-            local params   = self:DeclList()
-            local _        = self:e(")", oparen)
-
-            local rt_types = {}
-            if self:peek(":") then
-                self:region_begin()
-                self:e()
-                rt_types = self:RetTypes()
-                self:region_end()
-            end
-
-            local block    = self:Block()
-            local _        = self:e("end", start)
-
-            if not visibility then
-                self:syntax_error(start.loc,
-                    "Toplevel function declarations must have a 'local' or 'export' modifier")
-            end
-
-            for _, decl in ipairs(params) do
-                if not decl.type then
-                    self:syntax_error(decl.loc,
-                        "Parameter '%s' is missing a type annotation", decl.name)
-                end
-            end
-
-            local arg_types = {}
-            for i, decl in ipairs(params) do
-                arg_types[i] = decl.type
-            end
-            local func_typ = ast.Type.Function(visibility.loc, arg_types, rt_types)
-
-            return ast.Toplevel.Func(
-                visibility.loc, visibility.name,
-                ast.Decl.Decl(visibility.loc, id.value, func_typ),
-                ast.Exp.Lambda(visibility.loc, params, block))
-
-        elseif self:peek("NAME") then
-            local decls = self:DeclList(); assert(#decls > 0)
-            local _     = self:e("=")
-            local exps  = self:ExpList1();
-
-            if not visibility then
-                self:syntax_error(decls[1].loc,
-                    "Toplevel variable declarations must have a 'local' or 'export' modifier")
-            end
-
-            return ast.Toplevel.Var(visibility.loc, visibility.name, decls, exps)
-
-        else
-            self:unexpected_token_error("a toplevel declaration")
-        end
+        return ast.Toplevel.Stat(stat.loc, stat)
     end
 end
 
@@ -277,6 +222,9 @@ function Parser:SimpleType()
 
     elseif self:peek("NAME") then
         local tok = self:e()
+        if tok.value == 'module' then
+            return ast.Type.Module(tok.loc)
+        end
         return ast.Type.Name(tok.loc, tok.value)
 
     elseif self:peek("{") then
@@ -341,7 +289,7 @@ function Parser:block_follow()
            self:peek("until")
 end
 
-function Parser:Block()
+function Parser:StatList()
     local stats = {}
     while not self:block_follow() do
         if self:try(";") then
@@ -355,7 +303,64 @@ function Parser:Block()
             end
         end
     end
-    return ast.Stat.Block(false, stats)
+
+    return stats
+end
+
+function Parser:Block()
+    return ast.Stat.Block(false, self:StatList())
+end
+
+function Parser:Funcname()
+    local first_id = self:e("NAME")
+    local exp = ast.Exp.Var(first_id.loc, ast.Var.Name(first_id.loc, first_id.value))
+
+    if self:peek(".") then
+        local start = self:e()
+        local id    = self:e("NAME")
+        exp = ast.Exp.Var(start.loc, ast.Var.Dot(start.loc, exp, id.value))
+
+    elseif self:peek(":") then
+        error("Not Implemented")
+    end
+
+    return exp
+end
+
+function Parser:Func()
+    local start    = self:e("function")
+    local exp      = self:Funcname()
+    local oparen   = self:e("(")
+    local params   = self:DeclList()
+    local _        = self:e(")", oparen)
+
+    local rt_types = {}
+    if self:peek(":") then
+        self:region_begin()
+        self:e()
+        rt_types = self:RetTypes()
+        self:region_end()
+    end
+
+    local block    = self:Block()
+    local _        = self:e("end", start)
+
+    for _, decl in ipairs(params) do
+      if not decl.type then
+        self:syntax_error(decl.loc,
+          "Parameter '%s' is missing a type annotation", decl.name)
+      end
+    end
+
+    local arg_types = {}
+    for i, decl in ipairs(params) do
+      arg_types[i] = decl.type
+    end
+    local func_typ = ast.Type.Function(exp.loc, arg_types, rt_types)
+    return ast.Stat.Func(
+      exp.loc, exp,
+      ast.Decl.Decl(exp.loc, exp.value, func_typ),
+      ast.Exp.Lambda(exp.loc, params, block))
 end
 
 function Parser:Stat()
@@ -443,9 +448,13 @@ function Parser:Stat()
 
     elseif self:peek("local") then
         local start = self:e()
-        local decls = self:DeclList(); if #decls == 0 then self:forced_syntax_error("NAME") end
-        local exps  = self:try("=") and self:ExpList1() or {}
-        return ast.Stat.Decl(start.loc, decls, exps)
+        if self:peek("function") then
+            return self:Func()
+        else
+            local decls = self:DeclList(); if #decls == 0 then self:forced_syntax_error("NAME") end
+            local exps  = self:try("=") and self:ExpList1() or {}
+            return ast.Stat.Decl(start.loc, decls, exps)
+        end
 
     elseif self:peek("break") then
         local start = self:e()
@@ -462,6 +471,9 @@ function Parser:Stat()
         else
             return ast.Stat.Return(start.loc, self:ExpList1())
         end
+
+    elseif self:peek("function") then
+        return self:Func()
 
     else
         -- Assignment or function call
