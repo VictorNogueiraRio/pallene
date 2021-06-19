@@ -58,6 +58,8 @@ function Coder:init(module, modname, filename)
     self.upvalue_of_string    = {} -- str  => integer
     self.upvalue_of_function  = {} -- f_id => integer
     self.upvalue_of_global    = {} -- g_id => integer
+    self.upvalue_of_imported_function = {} -- f_id => integer
+    self.upvalue_of_imported_var = {}
     self:init_upvalues()
 
     self.record_ids    = {}      -- types.T.Record => integer
@@ -330,8 +332,21 @@ function Coder:c_value(value)
         return self:c_upval(value.id)
     elseif tag == "ir.Value.Function" then
         local f_id = value.id
-        local typ = self.module.functions[f_id].typ
-        return lua_value(typ, self:function_upvalue_slot(f_id))
+        local typ = value.is_imported and self.module.imported_functions[f_id].typ or
+                      self.module.functions[f_id].typ
+        local upv = value.is_imported and self:imported_function_upvalue_slot(f_id) or
+                      self:function_upvalue_slot(f_id)
+
+        return lua_value(typ, upv)
+    elseif tag == "ir.Value.ImportedFunction" then
+        local f_id = value.id
+        local typ = self.module.imported_functions[f_id].typ
+
+        return lua_value(typ, self:imported_function_upvalue_slot(f_id))
+    elseif tag == "ir.Value.ImportedVar" then
+        local v_id = value.id
+        local typ = self.module.imported_vars[v_id].typ
+        return lua_value(typ, self:imported_var_upvalue_slot(v_id))
     elseif typedecl.match_tag(tag, "ir.Value") then
         typedecl.tag_error(tag, "unable to get C expression for this value type.")
     else
@@ -627,7 +642,9 @@ typedecl.declare(coder, "coder", "Upvalue", {
     Metatable = {"typ"},
     String = {"str"},
     Function = {"f_id"},
+    ImportedFunction = {"f_id"},
     Global = {"g_id"},
+    ImportedVar = {"v_id"},
 })
 
 function Coder:init_upvalues()
@@ -683,6 +700,16 @@ function Coder:init_upvalues()
         table.insert(self.upvalues, coder.Upvalue.Global(g_id))
         self.upvalue_of_global[g_id] = #self.upvalues
     end
+
+    for f_id, func in ipairs(self.module.imported_functions) do
+        table.insert(self.upvalues, coder.Upvalue.ImportedFunction(f_id))
+        self.upvalue_of_imported_function[f_id] = #self.upvalues
+    end
+
+    for v_id, var in ipairs(self.module.imported_vars) do
+        table.insert(self.upvalues, coder.Upvalue.ImportedVar(v_id))
+        self.upvalue_of_imported_var[v_id] = #self.upvalues
+    end
 end
 
 local function upvalue_slot(ix)
@@ -701,6 +728,16 @@ end
 
 function Coder:function_upvalue_slot(f_id)
     local ix = assert(self.upvalue_of_function[f_id])
+    return upvalue_slot(ix)
+end
+
+function Coder:imported_function_upvalue_slot(f_id)
+    local ix = assert(self.upvalue_of_imported_function[f_id])
+    return upvalue_slot(ix)
+end
+
+function Coder:imported_var_upvalue_slot(v_id)
+    local ix = assert(self.upvalue_of_imported_var[v_id])
     return upvalue_slot(ix)
 end
 
@@ -1635,7 +1672,10 @@ function Coder:generate_module()
 
     table.insert(out, section_comment("Function Prototypes"))
     for f_id = 1, #self.module.functions do
-        table.insert(out, self:pallene_entry_point_declaration(f_id) .. ";")
+        local entry_point = self:pallene_entry_point_declaration(f_id)
+        if entry_point then
+            table.insert(out, entry_point .. ";")
+        end
     end
 
     for f_id = 1, #self.module.functions do
@@ -1644,13 +1684,19 @@ function Coder:generate_module()
 
     table.insert(out, section_comment("Function Implementations"))
     for f_id = 1, #self.module.functions do
-        table.insert(out, self:pallene_entry_point_definition(f_id))
+        local func = self.module.functions[f_id]
+        if func.body then
+            table.insert(out, self:pallene_entry_point_definition(f_id))
+        end
     end
 
     table.insert(out, section_comment("Exports"))
     for f_id = 1, #self.module.functions do
-        if f_id == 1 or self.upvalue_of_function[f_id] then
-            table.insert(out, self:lua_entry_point_definition(f_id))
+        local func = self.module.functions[f_id]
+        if func.body then
+            if f_id == 1 or self.upvalue_of_function[f_id] then
+                table.insert(out, self:lua_entry_point_definition(f_id))
+            end
         end
     end
     table.insert(out, self:generate_luaopen_function())
@@ -1661,6 +1707,7 @@ end
 function Coder:generate_luaopen_function()
 
     local init_constants = {}
+    local modules = {}
     for ix, upv in ipairs(self.upvalues) do
         local tag = upv._tag
         if tag ~= "coder.Upvalue.Global" then
@@ -1683,17 +1730,50 @@ function Coder:generate_luaopen_function()
                     entry_point = self:lua_entry_point_name(upv.f_id),
                     ix = C.integer(self.upvalue_of_function[upv.f_id]),
                 }))
+            elseif tag == "coder.Upvalue.ImportedFunction" then
+                local imported_func = self.module.imported_functions[upv.f_id]
+                modules[imported_func.mod] = modules[imported_func.mod] or {}
+                imported_func.id = upv.f_id
+                imported_func._tag = "func"
+                table.insert(modules[imported_func.mod], imported_func)
+            elseif tag == "coder.Upvalue.ImportedVar" then
+                local imported_var = self.module.imported_vars[upv.v_id]
+                modules[imported_var.mod] = modules[imported_var.mod] or {}
+                imported_var.id = upv.v_id
+                imported_var._tag = "var"
+                table.insert(modules[imported_var.mod], imported_var)
             else
                 typedecl.tag_error(tag)
             end
 
-            table.insert(init_constants, util.render([[
-                lua_setiuservalue(L, globals, $ix);
-                /**/
-            ]], {
-                ix = C.integer(ix),
-            }))
+            if tag ~= "coder.Upvalue.ImportedFunction" and tag ~= "coder.Upvalue.ImportedVar" then
+                table.insert(init_constants, util.render([[
+                    lua_setiuservalue(L, globals, $ix);
+                    /**/
+                ]], {
+                    ix = C.integer(ix),
+                }))
+            end
         end
+    end
+
+    local mod_num = 1
+    for mod_name, elems in pairs(modules) do
+        table.insert(init_constants, util.render([[
+                lua_getglobal(L, "require");
+                lua_pushstring(L, "$mod_name");
+                lua_call(L, 1, 1);
+        ]], { mod_name = mod_name }))
+        for _, elem in ipairs(elems) do
+              local ix = elem._tag == "func" and C.integer(self.upvalue_of_imported_function[elem.id]) or 
+                    C.integer(self.upvalue_of_imported_var[elem.id])
+
+              table.insert(init_constants, util.render([[
+                  lua_getfield(L, -1, "$elem_name");
+                  lua_setiuservalue(L, globals, $ix);
+              ]], { elem_name = elem.name, ix = ix }))
+        end
+        mod_num = mod_num + 1
     end
 
     local init_initializers = util.render([[

@@ -64,7 +64,7 @@ function driver.compile_internal(filename, input, stop_after, opt_level)
         return prog_ast, errs
     end
 
-    prog_ast, errs = checker.check(prog_ast)
+    prog_ast, errs = checker.check(prog_ast, driver)
     if stop_after == "checker" or not prog_ast then
         return prog_ast, errs
     end
@@ -161,6 +161,26 @@ local function compile_pln_to_lua(input_ext, output_ext, input_file_name, base_n
     return true, {}
 end
 
+local function compile_pln_to_inter(input_ext, output_ext, input_file_name, base_name)
+    assert(input_ext == "pln")
+
+    local input, err = driver.load_input(input_file_name)
+    if not input then
+        return false, { err }
+    end
+
+    local prog_ast, errs = driver.compile_internal(input_file_name, input, "checker")
+    if not prog_ast then
+        return false, errs
+    end
+
+    local translation = interface.translate(input, prog_ast)
+    print(translation)
+
+    assert(util.set_file_contents(base_name .. "." .. output_ext, translation))
+    return true, {}
+end
+
 
 -- Compile the contents of [input_file_name] with extension [input_ext].
 -- Writes the resulting output to [output_file_name] with extension [output_ext].
@@ -178,6 +198,8 @@ function driver.compile(argv0, opt_level, input_ext, output_ext, input_file_name
 
     if output_ext == "lua" then
         return compile_pln_to_lua(input_ext, output_ext, input_file_name, output_base_name)
+    elseif output_ext == "plni" then
+        return compile_pln_to_inter(input_ext, output_ext, input_file_name, output_base_name)
     else
         local first_step = step_index[input_ext]  or error("invalid extension")
         local last_step  = step_index[output_ext] or error("invalid extension")

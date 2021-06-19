@@ -46,11 +46,13 @@ local util = require "pallene.util"
 local checker = {}
 
 local Checker = util.Class()
+local driver = {}
 
 -- Type-check a Pallene module
 -- On success, returns the typechecked module for the program
 -- On failure, returns false and a list of compilation errors
-function checker.check(prog_ast)
+function checker.check(prog_ast, driver_passed)
+    driver = driver_passed
     local co = coroutine.create(function()
         return Checker.new():check_program(prog_ast)
     end)
@@ -96,6 +98,7 @@ function Checker:init()
     self.module_symbol = false       -- checker.Symbol.Module
     self.symbol_table = symtab.new() -- string => checker.Symbol
     self.ret_types_stack = {}        -- stack of types.T
+    self.imported_modules = {}       -- Imported modules
     return self
 end
 
@@ -266,8 +269,8 @@ function Checker:check_program(prog_ast)
     for _, tl_node in ipairs(prog_ast.tls) do
         local tag = tl_node._tag
         if     tag == "ast.Toplevel.Stats" then
-            for _, stat in ipairs(tl_node.stats) do
-                self:check_stat(stat, true)
+            for i, stat in ipairs(tl_node.stats) do
+                tl_node.stats[i] = self:check_stat(stat, true)
             end
 
         elseif tag == "ast.Toplevel.Typealias" then
@@ -323,6 +326,44 @@ function Checker:is_the_module_variable(exp)
         exp._tag == "ast.Exp.Var" and
         exp.var._tag == "ast.Var.Name" and
         (self.module_symbol == self.symbol_table:find_symbol(exp.var.name)))
+end
+
+function Checker:init_imported_module(var_name, mod_name)
+    local mod_ast = self.imported_modules[mod_name]
+    local symbols = {}
+    local func_num = 0
+    for _, tls in ipairs(mod_ast.tls) do
+        local stats = tls.stats
+        if stats then 
+            for _, stat in ipairs(stats) do
+                if stat._tag == "ast.Stat.LetRec" then
+                    for _, func_stat in ipairs(stat.func_stats) do
+                        if not func_stat.is_local then
+                            local arg_types = {}
+                            local typ = func_stat._type
+                            local def = checker.Def.Function(func_stat)
+                            def._num = func_num
+                            func_num = func_num + 1
+                            symbols[func_stat.name] = checker.Symbol.Value(typ, def)
+                        end
+                    end
+                elseif stat._tag == "ast.Stat.Assign" then
+                    for _, var in ipairs(stat.vars) do
+                        if var._exported_as then
+                            symbols[var.name] = checker.Symbol.Value(var._type, var._def)
+                        end
+                    end
+                end
+            end
+      end
+    end
+    self:add_module_symbol(var_name, types.T.String(), symbols)
+end
+
+local function exp_is_require(exp)
+    assert(exp._tag == "ast.Exp.Var")
+    local def = exp.var._def
+    return def and def._tag == "checker.Def.Builtin" and def.id == "require"
 end
 
 function Checker:add_func_stat_to_scope(stat, is_toplevel)
@@ -401,8 +442,14 @@ function Checker:check_stat(stat, is_toplevel)
             end
         end
 
-        for _, decl in ipairs(stat.decls) do
-            self:add_value_symbol(decl.name, decl._type, checker.Def.Variable(decl))
+        for i, decl in ipairs(stat.decls) do
+            if stat.exps[i]._tag == "ast.Exp.CallFunc" and exp_is_require(stat.exps[i].exp) then
+                self:init_imported_module(decl.name, stat.exps[i].args[i].value)
+                table.remove(stat.decls, i)
+                table.remove(stat.exps, i)
+            else
+                self:add_value_symbol(decl.name, decl._type, checker.Def.Variable(decl))
+            end
         end
 
     elseif tag == "ast.Stat.Block" then
@@ -682,6 +729,8 @@ function Checker:try_flatten_to_qualified_name(outer_var)
     local q = ast.Var.Name(var.loc, table.concat(components, "."))
     q._type = sym.typ
     q._def  = sym.def
+    local is_main_mod = self.module_symbol == self.symbol_table:find_symbol(root)
+    q._mod_name = not is_main_mod and root
     return q
 end
 
@@ -759,6 +808,22 @@ function Checker:coerce_numeric_exp_to_float(exp)
     end
 end
 
+function Checker:check_require(exp)
+    local args = exp.args
+    local arg = args[1]
+    local filename = string.format("%s.pln", arg.value)
+    local input, err = driver.load_input(filename)
+    if err then
+        type_error(exp.loc, string.format("Can't find module %s\n", mod_name))
+    end
+
+    local module_ast, err = driver.compile_internal(filename, input, "checker", 0)
+    if not module_ast then
+        type_error(exp.loc, err)
+    end
+    self.imported_modules[arg.value] = module_ast
+end
+
 -- Check (synthesize) the type of a function call expression.
 -- If the function returns 0 arguments, it is only allowed in a statement context.
 -- Void functions in an expression context are a constant source of headaches.
@@ -797,6 +862,10 @@ function Checker:check_fun_call(exp, is_stat)
         exp._type = f_type.ret_types[1]
     end
     exp._types = f_type.ret_types
+
+    if exp_is_require(exp.exp) then
+        self:check_require(exp)
+    end
 
     return exp
 end

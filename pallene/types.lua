@@ -26,6 +26,7 @@ declare_type("T", {
         "field_names", -- same order as the source type declaration
         "field_types", -- map { string => types.T }
     },
+    Module = {},
 })
 
 function types.is_gc(t)
@@ -33,7 +34,8 @@ function types.is_gc(t)
     if     tag == "types.T.Nil" or
            tag == "types.T.Boolean" or
            tag == "types.T.Integer" or
-           tag == "types.T.Float"
+           tag == "types.T.Float" or
+           tag == "types.T.Module"
     then
         return false
 
@@ -207,16 +209,16 @@ function types.consistent(t1, t2)
     return equivalent(t1, t2, true)
 end
 
-local function join_type_list(list)
+local function join_type_list(list, interface)
     local parts = {}
     for _, item in pairs(list) do
-        local part = types.tostring(item);
+        local part = types.tostring(item, interface);
         table.insert(parts, part)
     end
     return "(" .. table.concat(parts, ", ") .. ")"
 end
 
-function types.tostring(t)
+function types.tostring(t, interface)
     local tag = t._tag
     if     tag == "types.T.Any"         then return "any"
     elseif tag == "types.T.Nil"         then return "nil"
@@ -226,9 +228,9 @@ function types.tostring(t)
     elseif tag == "types.T.String"      then return "string"
     elseif tag == "types.T.Function" then
         return string.format("function type %s -> %s",
-            join_type_list(t.arg_types), join_type_list(t.ret_types))
+            join_type_list(t.arg_types, interface), join_type_list(t.ret_types, interface))
     elseif tag == "types.T.Array" then
-        return "{ " .. types.tostring(t.elem) .. " }"
+        return "{ " .. types.tostring(t.elem, interface) .. " }"
     elseif tag == "types.T.Table" then
         local sorted_fields = {}
         for name, typ in pairs(t.fields) do
@@ -238,17 +240,31 @@ function types.tostring(t)
 
         local parts = {}
         for _, field in ipairs(sorted_fields) do
-            local typ = types.tostring(field.typ)
+            local typ = types.tostring(field.typ, interface)
             table.insert(parts, string.format("%s: %s", field.name, typ))
         end
-
         return "{ " .. table.concat(parts, ", ") .. " }"
 
     elseif tag == "types.T.Record" then
+        if interface then
+            t._tag = "types.T.Table"
+            t.fields = t.field_types
+            --t.fields['$name'] = t.name
+            return types.tostring(t, interface)
+        end
         return t.name
     else
         typedecl.tag_error(tag)
     end
+end
+
+function types.tointerface(t, name)
+    local tag = t._tag
+    if tag == "types.T.Function" then
+        return string.format("function %s: %s -> %s", name,
+            join_type_list(t.arg_types, true), join_type_list(t.ret_types, true))
+    end
+    return types.tostring(t, true)
 end
 
 return types

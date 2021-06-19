@@ -147,6 +147,7 @@ end
 
 function ToIR:register_lambda(exp, name)
     assert(exp._tag == "ast.Exp.Lambda")
+    is_imported = is_imported or false
     local f_id = ir.add_function(self.module, exp.loc, name, exp._type)
     self.fun_id_of_exp[exp] = f_id
     return f_id
@@ -166,6 +167,14 @@ function ToIR:register_function(stat)
     if stat.module then
         ir.add_exported_function(self.module, f_id)
     end
+end
+
+function ToIR:register_imported_function(stat, mod_name)
+    assert(stat._tag == "ast.Stat.Func")
+    assert(not stat.is_local)
+    assert(stat.module)
+
+    return ir.add_imported_function(self.module, mod_name, stat.name, stat.value._type)
 end
 
 function ToIR:convert_toplevel(prog_ast)
@@ -761,6 +770,19 @@ function ToIR:exp_to_value(cmds, exp, _recursive)
         local var = exp.var
         if     var._tag == "ast.Var.Name" then
             local def = var._def
+            if var._mod_name then
+                local var_name
+                if def._tag == "checker.Def.Variable" then
+                    var_name = def.decl._exported_as
+                    local imported_var = { name = var_name, mod = var._mod_name, typ = var._type }
+                    table.insert(self.module.imported_vars, imported_var)
+                    return ir.Value.ImportedVar(#self.module.imported_vars)
+                else
+                    var_name = def.stat.name
+                    local id = self:register_imported_function(def.stat, var._mod_name)
+                    return ir.Value.ImportedFunction(id)
+                end
+            end
             if     def._tag == "checker.Def.Variable" then
                 local var_info = self:resolve_variable(def.decl)
                 if var_info._tag == "to_ir.Var.LocalVar" then
@@ -768,6 +790,7 @@ function ToIR:exp_to_value(cmds, exp, _recursive)
                 elseif var_info._tag == "to_ir.Var.Upvalue" then
                     return ir.Value.Upvalue(var_info.id)
                 elseif var_info._tag == "to_ir.Var.GlobalVar" then
+
                     -- Fallthrough to default
                 else
                     typedecl.tag_error(var_info._tag)
@@ -907,10 +930,12 @@ function ToIR:exp_to_assignment(cmds, dst, exp)
         self.dsts_of_call[exp] = dsts
 
         -- Evaluate the function call expression
+        local mod_name = exp.exp.var._mod_name
         local f_val
         if  def and (
                 def._tag == "checker.Def.Builtin" or
-                def._tag == "checker.Def.Function") then
+                def._tag == "checker.Def.Function") and
+                not mod_name then
             f_val = false
         else
             f_val = self:exp_to_value(cmds, exp.exp)
@@ -950,8 +975,15 @@ function ToIR:exp_to_assignment(cmds, dst, exp)
             end
 
         elseif def and def._tag == "checker.Def.Function" then
-            local f_id = assert(self.fun_id_of_exp[def.stat.value])
-            table.insert(cmds, ir.Cmd.CallStatic(loc, f_typ, dsts, f_id, xs))
+            if mod_name then
+                if not self.module.imported_functions[def.stat.name] then
+                    f_val.is_imported = true
+                end
+                table.insert(cmds, ir.Cmd.CallDyn(loc, f_typ, dsts, f_val, xs))
+            else
+                local f_id = assert(self.fun_id_of_exp[def.stat.value])
+                table.insert(cmds, ir.Cmd.CallStatic(loc, f_typ, dsts, f_id, xs))
+            end
 
         else
             table.insert(cmds, ir.Cmd.CallDyn(loc, f_typ, dsts, f_val, xs))
