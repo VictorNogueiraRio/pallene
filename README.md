@@ -199,3 +199,21 @@ To run benchmarks with LuaJIT, use the `--lua` option:
 
 > Please run `./benchmarks/generate_lua` to translate all the benchmarks written in Pallene to Lua
 > whenever changes are made to the translator.
+
+### Projeto Final De Programação
+
+The implementation of modules in Pallene was part of a PUC-Rio postgraduate course called `Projeto Final De Programação`.
+
+The documentation regarding modules is available in these 2 links:
+
+https://github.com/VictorNogueiraRio/pallene/blob/master/doc/manual.md#imported-modules
+
+https://github.com/VictorNogueiraRio/pallene/blob/master/doc/manual.md#module-local-variables
+
+Module tests are available in this commit: https://github.com/VictorNogueiraRio/pallene/commit/ff4545d3aee3763c0d80208570f70a786c2df2d4
+
+Parser tests addressing the syntatic changes implemented are available in the test section described as `program`:
+https://github.com/VictorNogueiraRio/pallene/blob/master/spec/parser\_spec.lua#L175
+
+A pdf, in portuguese, describing what was implemented during the PUC-Rio `Projeto Final De Programação` course is available here:
+https://github.com/VictorNogueiraRio/pallene/blob/master/projfinal/INF2102.pdf
